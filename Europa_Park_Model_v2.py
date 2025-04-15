@@ -2,10 +2,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import random
 import math
+from collections import Counter
 
 POP_SIZE = 300  # Population size
 MUTATION_RATE = 0.2  # Mutation rate
-GENERATIONS = 300
+GENERATIONS = 500
+MAXIMUM_ALLOWED_RERIDES = 3 # Maximum allowed rerides
+MAXIMUM_PENALTY = 60 # Maximum penalty for exceeding number of rerides
 
 # Create a fully connected graph of rides
 ride_name_list = ['Alpine Express', 'Bumper Cars', 'Arthur', 'Atlantica SuperSplash', 'Atlantis Adventure','Blue Fire Megacoaster', 'Cassandras Curse', 'Castello dei Medici', 'Euro-Mir', 'Can Can Coaster', 'Fjord Rafting', 'Madame Freudenreich Curiosites', 'Matterhorn Blitz', 'Carousel', 'Pirates in Batavia', 'Queens Diamonds', 'Silver Star', 'Swiss Bob Run', 'Tirol Log Flume', 'Vindjammer', 'Voletarium', 'Voltron Nevera', 'Poseidon', 'Wodan']
@@ -47,7 +50,14 @@ def choose_excluding_last(values, last_choice):
         raise ValueError("No values to choose from after excluding last choice.")
     return random.choice(choices)
 
-def compute_fitness(route, rides, walk_times):
+def compute_fitness(route, rides, walk_times, generation_number):
+    penalty_weight = generation_number / GENERATIONS * MAXIMUM_PENALTY
+    total_penalty = 0
+    ride_counts = Counter(route)
+    for ride, count in ride_counts.items():
+        if count > MAXIMUM_ALLOWED_RERIDES:
+            total_penalty += (count - MAXIMUM_ALLOWED_RERIDES) * penalty_weight
+    total_penalty = min(total_penalty, 120)  # ~80% of best score
     total_time = rides[route[0]]["duration"] + rides[route[0]]["wait_time"]
     total_interest = (rides[route[0]]["bryan_interest"]+rides[route[0]]["dante_interest"]+rides[route[0]]["pratik_interest"]+rides[route[0]]["saahil_interest"])/4
     bryan_interest = rides[route[0]]["bryan_interest"]
@@ -67,7 +77,7 @@ def compute_fitness(route, rides, walk_times):
         i += 1
     if total_time > 540:
         return -1, -1, -1, -1, -1, -1
-    return (total_interest*.5+min(bryan_interest, dante_interest, pratik_interest, saahil_interest)*.5), i, bryan_interest/i, dante_interest/i, pratik_interest/i, saahil_interest/i
+    return (total_interest*.5+min(bryan_interest, dante_interest, pratik_interest, saahil_interest)*.5-total_penalty), i, bryan_interest/i, dante_interest/i, pratik_interest/i, saahil_interest/i
 
 def generate_random_route(rides, walk_times):
     route = []
@@ -87,9 +97,38 @@ def generate_random_route(rides, walk_times):
         current = ride
     return route
 
-def crossover(route1, route2):
+def basic_crossover(route1, route2):
     cut = random.randint(1, min(len(route1), len(route2)) - 1)
     return route1[:cut] + route2[cut:]
+
+def flexible_order_crossover(route1, route2):
+    # Identify short and long parent for slice vs fill
+    if len(route1) < len(route2):
+        short_parent = route1
+        long_parent = route2
+    else:
+        short_parent = route2
+        long_parent = route1
+
+    final_length = len(long_parent)
+    a, b = sorted(random.sample(range(len(short_parent)), 2))
+
+    # Step 1: Copy segment
+    child = [None] * final_length
+    segment = short_parent[a:b+1]
+    child[a:b+1] = segment
+
+    # Step 2: Fill remaining positions from long_parent, allowing duplicates
+    fill_positions = [i for i in range(final_length) if child[i] is None]
+
+    # Use round-robin filling
+    fill_index = 0
+    for pos in fill_positions:
+        gene = long_parent[fill_index % len(long_parent)]
+        child[pos] = gene
+        fill_index += 1
+
+    return child
 
 def mutate(route, rides):
     if len(route) == 0:
@@ -104,51 +143,44 @@ def select_parents(population, fitnesses):
     weights = [f / total if (total>0) else 1 / len(fitnesses) for f in fitnesses]
     return random.choices(population, weights=weights, k=2)
 
-def next_generation(population):
-    fitnesses = [compute_fitness(r, ride_list, walk_times_list)[0] for r in population]
-    new_pop = []
+def next_generation(population, generation_number):
+    fitness_results = [(r, compute_fitness(r, ride_list, walk_times_list, generation_number - 1)) for r in population]
+    elite_route, elite_fitness = max(fitness_results, key=lambda x: x[1][0])
+    new_pop = [elite_route]
     while len(new_pop) < POP_SIZE:
-        p1, p2 = select_parents(population, fitnesses)
-        child = crossover(p1, p2)
+        p1, p2 = select_parents(population, [f[1][0] for f in fitness_results])
+        child = flexible_order_crossover(p1, p2)
         if random.random() < MUTATION_RATE:
-            child = mutate(child,ride_list)
+            child = mutate(child, ride_list)
         new_pop.append(child)
-    return new_pop
+    return new_pop, elite_route, elite_fitness
 
 def run_evolution():
-    # Turn on interactive mode
-    plt.ion()
-
-    # Create the figure and axis
-    fig, ax = plt.subplots()
     x_data, y_data = [], []
-    sc = ax.scatter(x_data, y_data)
-    
-    population = [generate_random_route(ride_list,walk_times_list) for _ in range(POP_SIZE)]
+
+    population = [generate_random_route(ride_list, walk_times_list) for _ in range(POP_SIZE)]
     best_route = None
     best_data = None
     generation_num = 1
     for _ in range(GENERATIONS):
-        population = next_generation(population)
-        # Create a list of (candidate, fitness_tuple) pairs
-        fitness_results = [(r, compute_fitness(r, ride_list, walk_times_list)) for r in population]
-        # Find the one with the best fitness (first value in the tuple)
-        best_candidate, best_fitness_tuple = max(fitness_results, key=lambda x: x[1][0])
-        # Update best if it's None or if the current candidate is better
-        if best_route is None or best_fitness_tuple[0] > best_data[0]:
-            best_route, best_data = best_candidate, best_fitness_tuple
-        
-        # Add to the data lists
+        print("Running Generation", generation_num)
+        population, elite_route, elite_fitness = next_generation(population, generation_num)
+
+        if best_data is None or elite_fitness[0] > best_data[0]:
+            best_route, best_data = elite_route, elite_fitness
+
         x_data.append(generation_num)
-        y_data.append(best_fitness_tuple[0])
+        y_data.append(best_data[0])  # 👈 use stored best, not recomputed value!
 
-        # Update scatter data
-        sc.remove()  # remove old scatter
-        sc = ax.scatter(x_data, y_data, color='blue')
-
-        # Redraw
-        plt.pause(0.1)  # Small pause to allow GUI to update
         generation_num += 1
+
+    # Plot
+    plt.plot(x_data, y_data, marker='o', linestyle='None', color='blue')
+    plt.xlabel("Generation")
+    plt.ylabel("Best Fitness")
+    plt.title("Best Fitness Over Generations")
+    plt.grid(True)
+    plt.show()
     return best_route, best_data
 
 optimized_route, optimized_data = run_evolution()
